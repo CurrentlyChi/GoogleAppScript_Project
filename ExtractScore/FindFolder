@@ -1,0 +1,52 @@
+//フォルダidを検出する
+//指定の課題フォルダidを検出する順番は次です。「Classroom」→　「【〇期〇月開始】テストエンジニア研修」→　課題名を持つフォルダ
+function getFolderIdFromShortcut(parentFolderName, childFolderName, targetFolderName) {
+  try {
+  // 検索した結果、フォルダが一つも見つからなかった場合、エラーを投げます。
+  // hasNext()メソッドは、結果セットに次の要素（フォルダ）が存在するかどうかを確認します。
+  // 存在しない場合はfalseを返し、このif文がtrueと評価されます。
+    var parentFolders = DriveApp.getFoldersByName(parentFolderName);
+ 
+    if (!parentFolders.hasNext()) {
+      throw new Error('指定の親フォルダ 『' + parentFolderName + '』 が見つかりませんでした。');//カスタマイズのエラーメッセージが作成
+    }
+    var parentFolder = parentFolders.next();
+　//------------------------------------- 1.0.1 ADD  START---------------------------------------- ------------------------------------------ 
+    //親フォルダ内で指定された対象とするフォルダを検索（元のフォルダ）
+    var childFolders = parentFolder.getFoldersByName(childFolderName);
+    if (childFolders.hasNext()) {
+      var childFolder = childFolders.next();
+      return getFolderIdByName(childFolder, targetFolderName);
+    }
+  //------------------------------------- 1.0.1 ADD  END------------------------------------- ------------------------------------- 
+    // 元のフォルダが見つからない場合、ショートカットフォルダを検索
+    var shortcuts = parentFolder.getFilesByName(childFolderName);
+
+  //-------------------------------------1.0.2  UPDATE  START ------------------------------------- ------------------------------------- 
+    if (!shortcuts.hasNext()) {//【〇期〇月】テストエンジニアというフォルダが見つからなかったら、エラーを投げて、処理を中断
+      throw new Error('指定のフォルダ『 ' + childFolderName + '』 が見つかりませんでした。');//カスタマイズのエラーメッセージが作成
+  //-------------------------------------1.0.2  UPDATE  END ---------------------------------------- ------------------------------------------ 
+    }
+    var shortcut = shortcuts.next();
+    
+    // ショートカットを通じて元のフォルダのIDを取得し、そのIDでフォルダを開く
+    var realFolder = DriveApp.getFolderById(shortcut.getTargetId());
+    return getFolderIdByName(realFolder, targetFolderName);
+   
+  } catch (e) {//エラーが発生したら、エラーを投げる
+    Logger.log('エラーが発生しました: ' + e.message);
+    throw e;  // global handling errorにエラーの内容が投げるために、エラーを再スローする
+  }
+}
+
+
+//---------------------------------1.0.5 2024/08/13  ADD　START ---------------------------------
+function getFolderIdByName(folder, folderName) {
+  var folders = folder.getFoldersByName(folderName);
+  if (folders.hasNext()) {
+    return folders.next().getId();
+  } else {
+    throw new Error('指定の対象フォルダ『' + folderName + '』が見つかりませんでした。');
+  }
+}
+//---------------------------------1.0.5 2024/08/13  ADD　END ---------------------------------
