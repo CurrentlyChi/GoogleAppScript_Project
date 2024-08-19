@@ -1,0 +1,132 @@
+//MAIN
+
+function sendLicenseReminders() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("ライセンス更新情報");
+  //シート内のデータを2次元の配列として取得
+  var data = sheet.getDataRange().getValues();
+  //現在の日付を取得
+  var today = new Date();
+  // テスト用：var today = new Date('2024-3-01');
+  //今年を取得
+  var currentYear = today.getFullYear();
+  //今月を取得
+  var currentMonth = today.getMonth();
+  //3行目にあるすべての月の名前を取得
+  var monthNames = data[2];
+ 
+
+
+  // 次の2つの月の列インデックスを取得
+  var oneMonthAheadColumnIndex = findMonthColumnIndex(monthNames, currentMonth + 1);
+  var twoMonthsAheadColumnIndex = findMonthColumnIndex(monthNames, currentMonth + 2);
+
+  //月名が見つからなかった場合、slack通知
+  if (oneMonthAheadColumnIndex === -1 || twoMonthsAheadColumnIndex === -1) {
+    sendSlackError();
+    return; 
+  }
+
+  // 各企業のデータを処理するためのループを開始
+  for (var i = 3; i < data.length; i += 5) {
+    //企業名を取得
+    var companyName = data[i][1];
+    //1ヶ月後の「次回更新日」を取得 
+    var renewalDateOneMonthAhead = data[i + 4][oneMonthAheadColumnIndex];
+    // 1ヶ月後の「ライセンス名」を取得
+    var oneMonthAheadLicenseName = data[i][oneMonthAheadColumnIndex];
+    //2ヶ月後の「次回更新日」を取得 
+    var renewalDateTwoMonthAhead = data[i + 4][twoMonthsAheadColumnIndex];
+    //2ヶ月後「ライセンス名」を取得 
+    var twoMonthAheadLicenseName = data[i][twoMonthsAheadColumnIndex];
+    //担当者の名前を取得
+    var personInCharge = data[i][2];
+    var userID;
+    //担当者と会社名をちゃんと取得しているのか確認
+    console.log("Processing: " + companyName + ", In charge: " + personInCharge);
+    if (personInCharge === "藤田") {
+        userID = "U05DQEZLCMD";
+      }
+    else if (personInCharge === "鮫島") { 
+        userID = "U05ELFHNLNP";
+      }
+    else if (personInCharge === "大石") { 
+        userID = "U05E4T4GJFM";
+      }
+
+　　　//1ヶ月後のライセンス更新情報が存在し、ライセンス名も存在し、通知が必要である場合に実行される
+     if (renewalDateOneMonthAhead && oneMonthAheadLicenseName && shouldNotify(renewalDateOneMonthAhead, currentYear,currentMonth)) {
+      //1ヶ月後の次回更新日の値を日付型に変換
+      var parsedRenewalDateOneMonth = new Date(renewalDateOneMonthAhead);
+      //slack通知
+      sendSlackNotification(companyName, parsedRenewalDateOneMonth, "1ヶ月", oneMonthAheadLicenseName,userID);
+    }
+
+    //2ヶ月後のライセンス更新情報が存在し、ライセンス名も存在し、通知が必要である場合に実行される
+    if (renewalDateTwoMonthAhead && twoMonthAheadLicenseName && shouldNotify(renewalDateTwoMonthAhead, currentYear,currentMonth)) {
+      //2ヶ月後の次回更新日の値を日付に変換
+      var parsedRenewalDateTwoMonth = new Date(renewalDateTwoMonthAhead);
+      //slack通知
+      sendSlackNotification(companyName, parsedRenewalDateTwoMonth, "2ヶ月", twoMonthAheadLicenseName,userID);
+    }
+  }
+}
+
+//呼び出される関数たち
+
+// 月名を基に、1ヶ月後と2ヶ月後の列インデックスを取得
+function findMonthColumnIndex(monthNames, targetMonth) {
+  var targetMonthIndex = targetMonth % 12; // これにより、12月（11）+ 1が0月（1月）に巻き戻されます
+  var targetMonthName = (targetMonthIndex + 1) + "月"; // 0から11の月を1から12の月に変換します
+
+  // monthNamesの中で一致する月が見つかった場合、その月のインデックス（列インデックス）を返す。見つからない場合は-1を返す。
+  for (var i = 0; i < monthNames.length; i++) {
+    if (monthNames[i] === targetMonthName) {
+      return i; 
+    }
+  }
+  return -1; 
+}
+
+//実行日により、通知条件を設定
+function shouldNotify(renewalDate, currentYear, currentMonth) {
+  var renewalYear = new Date(renewalDate).getFullYear();
+  // 12月の場合、翌年の更新のみ通知
+  if (currentMonth === 11) { 
+    return renewalYear === currentYear + 1;
+  } else {
+    // それ以外の月は、現年度の更新にのみ通知
+    return renewalYear === currentYear;
+  }
+}
+//slack通知
+function sendSlackNotification(company, date, period, licenseName,userID) {
+  var webhookUrl = "https://hooks.slack.com/services/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"; 
+  var formattedDate = date ? Utilities.formatDate(new Date(date), "JST", "yyyy/MM/dd") : "N/A";
+  var message = "<@"+ userID + ">\n" + "以下、顧客のライセンス" + period + "前です\n企業名：" + company + "\nライセンス名：" + licenseName + "\n更新日：" + formattedDate;
+  var payload = JSON.stringify({ "text": message });
+
+  var options = {
+    "method": "post",
+    "contentType": "application/json",
+    "payload": payload
+  };
+
+  UrlFetchApp.fetch(webhookUrl, options);
+}
+
+//月名が見つからなかった場合、slack通知
+function sendSlackError() {
+  //通知先を変更したい場合、以下のリンクを変更する
+  var webhookUrl = "https://hooks.slack.com/services/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";
+  //通知内容を作成
+  var message = "<!here>\n" + "Error:\n" + "月の名前が見当たりませんでした。\n" + "ライセンス更新ファイルに月の名前が記載される行について、スペースの有無などをご確認ください。";
+  var payload = JSON.stringify({ "text": message });
+
+  var options = {
+    "method": "post",
+    "contentType": "application/json",
+    "payload": payload
+  };
+
+  UrlFetchApp.fetch(webhookUrl, options);
+}
