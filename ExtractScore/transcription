@@ -1,0 +1,471 @@
+function listFilesAndWriteValues(folderId, targetFolderName, targetSheetName, destinedFileID) {
+  const folder = DriveApp.getFolderById(folderId);//指定フォルダを開く
+  let files = folder.getFiles(); //解答用フォルダから取得されたファイルは固定であるために、letを使用
+  const targetSpreadsheet = openSpreadsheetbyID(destinedFileID);//転記先ファイルを開く
+  const targetSheet = targetSpreadsheet.getSheetByName(targetSheetName); //転記先シートを指定
+
+// ---------------------------------1.0.3  ADD  START  ---------------------------------------------------------------------------------------------------
+  //指定のフォルダに解答ファイルが存在しなければ、エラーを投げて、処理を中断
+  if (!files.hasNext()) {
+    throw new Error('ファイル0件');
+  }
+// ---------------------------------1.0.3  ADD   END  ---------------------------------------------------------------------------------------------------
+
+  //社員番号、網羅率を一時的格納する辞書型変数
+  let employeeDict = {}; 
+  //転記先ファイルに存在しない社員番号を格納するリスト型変数を宣言
+  let nonExistEmployeeId = [];
+  //網羅率の変更があった社員番号を格納するリストを宣言
+  let scoreUpdate = [];
+
+
+  //転記先ファイルで課題ごとに網羅率を記入する列が異なるため、関数を使用して、課題名をもとに、記入すべき列を抽出
+  const [targetPerspectiveColumn, targetQuestionColumn] = getCellAddressForTargetSheet(targetFolderName);
+  
+  
+
+ //課題ごとに、網羅率が格納されるセルが異なるため、課題名をもとに、網羅率が格納されるセルを抽出する
+  const studentPerspectiveCell = getCellAddressForSheet1(targetFolderName);
+  const studentQuestionCell = getCellAddressForSheet2(targetFolderName);
+
+
+ //転記先ファイルから社員番号と名前を取得して、それらを辞書型に格納する
+  var employeeData = extractData(targetSheet);
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
+  // エラーが発生したファイル名を格納するリスト
+  let errorFiles = [];
+
+ //指定フォルダ内のファイル数分繰り返し
+  while (files.hasNext()) {
+    const file = files.next();
+    
+    //処理中のファイルにエラーが発生したら、次の処理を行う。１.通知用のリストにそのファイルのファイル名を格納  2.そのファイルをスキップして、次のファイルの処理に進む
+    try{
+    //ファイルはスプシなら、ファイルを開く、excelなら、一旦excelファイルをスプシに変換してから、開く
+      let spreadsheet;
+      if (file.getMimeType() === MimeType.GOOGLE_SHEETS || file.getMimeType() === MimeType.MICROSOFT_EXCEL) {
+          if (file.getMimeType() === MimeType.MICROSOFT_EXCEL) {
+              // Excel ファイルをGoogle SpreadSheetに変換
+              spreadsheet = convertExceltoSheet(file, folderId);
+          } else {
+              //スプシを開く
+              spreadsheet = SpreadsheetApp.openById(file.getId());
+          }
+
+          // ファイル名から社員番号を抽出
+          const employeeDetails = extractEmployeeDetails(file.getName());
+
+          // 社員番号、網羅率を一時的格納するemployDictのキーを設定する
+          const employeeID = employeeDetails.employeeId;
+          const employeeName = employeeDetails.name;
+
+          // 「観点表」シートと「質問表」シートから網羅率を取得
+          const perspectiveSheetRange = spreadsheet.getSheetByName('観点表').getRange(studentPerspectiveCell);//観点表での範囲を指定
+          const questionSheetRange = spreadsheet.getSheetByName('質問表').getRange(studentQuestionCell);//質問表での範囲を指定
+          const perspectiveCoverage = perspectiveSheetRange.getValue();//観点網羅率を取得
+          const questionCoverage = questionSheetRange.getValue();//質問網羅率を取得
+
+          // 社員番号あるいは名前がまだemployeeDictに存在しなければ、それをemployeeDictに追加する。
+          // 社員番号が既に存在した場合、その社員番号の名前も既存の値と一致しているか確認してから、網羅率を最大値で更新
+          if (!employeeDict[employeeID]) {//処理中の社員番号がemployeeDictに存在しなければ、社員番号とそれに紐づけデータを追加する
+              employeeDict[employeeID] = [{
+                  name: employeeName,
+                  perspectiveMaxValue: perspectiveCoverage,
+                  questionMaxValue: questionCoverage
+              }];
+          } else {//処理中の社員番号がemployeeDictに存在したら、その社員番号に紐づく名前が既存のデータと一致しているか確認する
+              let existingEntry = employeeDict[employeeID].find(entry => entry.name === employeeName);
+              if (existingEntry) {
+                  // 名前が一致する場合、最大の網羅率で更新する
+                  existingEntry.perspectiveMaxValue = Math.max(existingEntry.perspectiveMaxValue, perspectiveCoverage);//最大の観点網羅率
+                  existingEntry.questionMaxValue = Math.max(existingEntry.questionMaxValue, questionCoverage);//最大の質問網羅率
+              } else {
+                  // 名前が異なる場合、新しい名前のエントリを追加
+                  employeeDict[employeeID].push({
+                      name: employeeName,
+                      perspectiveMaxValue: perspectiveCoverage,
+                      questionMaxValue: questionCoverage
+                  });
+              }
+          }
+      }
+    } catch (e) {//エラーが発生したら、
+      Logger.log("Error processing file " + file.getName() + ": " + e.message);
+      errorFiles.push(file.getName()); // エラーが発生したファイル名をリストに追加
+      continue; // 次のファイルへ処理を進める
+    }
+  }
+// ---------------------------------1.0.4  UPDATE  START  ---------------------------------------------------------------------------------------------------
+  // console.log(errorFiles);//テスト用
+  // console.log(employeeDict);//テスト用
+
+// ---------------------------------1.0.4  UPDATE  END  ---------------------------------------------------------------------------------------------------
+
+  let pairMatchingDict = {};//転記先ファイルのデータの「社員番号」「名前」と完全一致するデータが格納する辞書型変数
+  let notPairMatchingDict = {};//転記先ファイルのデータの「社員番号」あるいは「名前」と一致するデータが格納する辞書型変数
+
+//社員情報を管理しているemployeeDictのデータ分を繰り返し
+  Object.keys(employeeDict).forEach(employeeID => {
+  employeeDict[employeeID].forEach(detail => {
+    if (employeeData.hasOwnProperty(employeeID) && employeeData[employeeID] === detail.name) {
+      // 社員番号とそれに紐づく名前は転記先ファイルにて該当する社員番号とそれに紐づく名前と一致している場合、pairMatchingDictに追加
+      if (!pairMatchingDict[employeeID]) {
+        pairMatchingDict[employeeID] = [];
+      }
+      pairMatchingDict[employeeID].push(detail);
+    } else {
+      // 社員番号とそれに紐づく名前は転記先ファイルにて該当する社員番号とそれに紐づく名前と一致している場合、notPairMatchingDictに追加
+      if (!notPairMatchingDict[employeeID]) {
+        notPairMatchingDict[employeeID] = [];
+      }
+      notPairMatchingDict[employeeID].push(detail);
+    }
+  });
+});
+
+
+// ---------------------------------1.0.4  UPDATE  START  ---------------------------------------------------------------------------------------------------
+// 確認用ログ
+  // console.log("Not Pair Matching Dictionary: ", notPairMatchingDict);
+// ---------------------------------1.0.4  UPDATE  END  ---------------------------------------------------------------------------------------------------
+
+//notPairMatchingにある社員番号あるいは名前はpairMatchingにある場合、それらをnotPairMatchingから削除する
+//目的：転記先ファイルにて、notPairMatchingにある社員番号あるいはpairMatchingDictにある社員番号、名前を持つ行で網羅率を更新しないようにするため
+  Object.keys(notPairMatchingDict).forEach(employeeID => {
+    const nameListInPairDict = new Set(); // PairMatchingDict に含まれるすべての名前を格納するセット
+    Object.values(pairMatchingDict).forEach(entries => {
+        entries.forEach(entry => {
+            nameListInPairDict.add(entry.name);
+        });
+    });
+
+    // 社員番号が pairMatchingDict に存在するか確認
+    const existsInPairDict = pairMatchingDict.hasOwnProperty(employeeID);
+
+    notPairMatchingDict[employeeID] = notPairMatchingDict[employeeID].filter(detail => {
+        // 社員番号が PairMatchingDict に存在するか、またはその名前が PairMatchingDict のどこかに存在するかを確認
+        return !existsInPairDict && !nameListInPairDict.has(detail.name);
+    });
+
+    // フィルタリング後のリストが空になった場合、そのキーを削除
+    if (notPairMatchingDict[employeeID].length === 0) {
+        delete notPairMatchingDict[employeeID];
+    }
+});
+
+// ---------------------------------1.0.4  UPDATE  START  ---------------------------------------------------------------------------------------------------
+// 確認用ログ
+  // console.log("Updated Not Pair Matching Dictionary: ", notPairMatchingDict);
+
+// ---------------------------------1.0.4  UPDATE  END  ---------------------------------------------------------------------------------------------------
+
+  //社員番号かつ名前が転記先ファイルのデータと一致しているデータが格納されるpairMatchingDictの繰り返しを開始
+  //転記を行う前に、転記先ファイルで現在処理している社員番号が存在する行のインデックスを見つけ出し、その行にデータを転記または更新
+  Object.keys(pairMatchingDict).forEach(employeeID => {
+      let rowIndex = findEmployeeIDInColumn(employeeID, targetSheet);//転記先ファイルでその社員番号を持つ行を検出する
+      let persepectiveCoverage = employeeDict[employeeID][0].perspectiveMaxValue;//観点網羅率を抽出//employeeDictはネストされた辞書型のため、インデクス[0]も指定する必要があります
+      let questionCoverage = employeeDict[employeeID][0].questionMaxValue;//質問網羅率を抽出
+
+　// ---------------------------------1.0.4  UPDATE  START  ---------------------------------------------------------------------------------------------------
+      // console.log(`Employee ID: ${employeeID}, Perspective: ${employeeDict[employeeID][0].perspectiveMaxValue}, Question: ${employeeDict[employeeID][0].questionMaxValue}`);
+// ---------------------------------1.0.4  UPDATE  END  ---------------------------------------------------------------------------------------------------
+
+      updateCellValueConditional(targetSheet, rowIndex, targetPerspectiveColumn, persepectiveCoverage, employeeID, scoreUpdate);//観点網羅率を転記
+      updateCellValueConditional(targetSheet, rowIndex, targetQuestionColumn, questionCoverage, employeeID, scoreUpdate)//質問網羅率を転記
+  });
+
+  
+  
+  //社員番号あるいは名前が転記先ファイルのデータと一致しているデータが格納されるnotPairMatchingDictの繰り返し処理を開始
+  //転記を行う前に、転記先ファイルで現在処理している社員番号が存在する行のインデックスを見つけ出し、その行にデータを転記または更新
+  Object.keys(notPairMatchingDict).forEach(employeeID => {
+      let rowIndexForEmployeeID = findEmployeeIDInColumn(employeeID, targetSheet);//転記先ファイルでその社員番号を持つ行を検出する
+      let persepectiveCoverage = employeeDict[employeeID][0].perspectiveMaxValue;//観点網羅率を抽出//employeeDictはネストされた辞書型のため、インデクス[0]も指定する必要があります
+      let questionCoverage = employeeDict[employeeID][0].questionMaxValue;//質問網羅率を抽出
+     
+     // ---------------------------------1.0.4  UPDATE  START  ---------------------------------------------------------------------------------------------------
+      // console.log(`Employee ID: ${employeeID}, Perspective: ${employeeDict[employeeID][0].perspectiveMaxValue}, Question: ${employeeDict[employeeID][0].questionMaxValue}`);
+
+      // ---------------------------------1.0.4  UPDATE  END  ---------------------------------------------------------------------------------------------------
+
+        if (rowIndexForEmployeeID === -1) {//社員番号を持つ行が見つからなかった場合
+          console.log(employeeDict[employeeID][0].name);//テスト用
+          let rowIndexForName = findEmployeeNameInColumn(employeeDict[employeeID][0].name, targetSheet);//処理中の名前を持つ行を検出する
+          if(rowIndexForName === -1){//処理中の名前を持つ行が見つからなかった場合、転記先ファイルに存在しない社員番号を通知用のリストに格納する
+            nonExistEmployeeId.push(employeeID);
+          }//処理中の社員番号あるいは名前が転記先ファイルに存在しなければ、その社員番号を通知用のリストに格納する
+          else {//処理中の名前を持つ行が見つかった場合、その行で網羅率を転記する
+            updateCellValueConditional(targetSheet, rowIndexForName, targetPerspectiveColumn, persepectiveCoverage, employeeID, scoreUpdate);//観点網羅率を転記
+            updateCellValueConditional(targetSheet, rowIndexForName, targetQuestionColumn, questionCoverage, employeeID, scoreUpdate);//質問網羅率を転記
+          }
+
+      } else {//社員番号を持つ行が見つかった場合、その行で網羅率を転記する
+          updateCellValueConditional(targetSheet, rowIndexForEmployeeID, targetPerspectiveColumn, persepectiveCoverage, employeeID, scoreUpdate);
+          updateCellValueConditional(targetSheet, rowIndexForEmployeeID, targetQuestionColumn, questionCoverage, employeeID, scoreUpdate);
+      }
+    });
+
+  return { scoreUpdate, nonExistEmployeeId, errorFiles }; //「網羅率の転記_MAIN.gs」にあるslack通知関数を利用するために、各リストを戻す
+
+    //Debug用
+    // scoreUpdate = [...new Set(scoreUpdate)];//重複な社員番号を削除
+    // console.log(scoreUpdate.join(', '));
+    // console.log(nonExistEmployeeId.join(', '));
+    
+}
+
+//各関数
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//指定の転記先ファイルを開く
+function openSpreadsheetbyID(destinedFileID) {
+  //指定の転記先ファイルを開けなかった場合、エラーを投げる
+  try {
+    const targetSpreadsheet = SpreadsheetApp.openById(destinedFileID);
+    return targetSpreadsheet; // スプレッドシートが正常に開かれた場合、そのオブジェクトを返す
+  } catch(e) {
+    // エラーメッセージをカスタマイズしてログに記録またはユーザーに通知し、エラーを再スロー
+    var customError = new Error('指定の転記先ファイルが見つかりませんでした。');
+    Logger.log(customError.message);
+    throw customError;
+  }
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//ExcelファイルをGoogleスプレシートに変換
+function convertExceltoSheet(file,folderId) {
+  const blob = file.getBlob(); //ファイルのBlobを取得
+  const fileResource = {
+    title: file.getName(),
+    mimeType: MimeType.GOOGLE_SHEETS,
+    parents: [{id: folderId}]
+  };
+  //Drive APIを使用してファイルをGoogleスプレシートに変換
+  const convertedFile = Drive.Files.create(fileResource, blob, {convert:true});
+  return SpreadsheetApp.openById(convertedFile.id);
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//解答ファイルのファイル名から社員番号と社員の名前を取得する
+function extractEmployeeDetails(fileName) {
+// ファイル名からすべての空白文字（スペース、タブなど）を削除する
+  fileName = fileName.replace(/\s/g, '');
+// ファイル名から社員番号と名前を抽出するための正規表現パターンを定義する
+  const pattern = /^(\d+)_([^_]+)_/;
+// ファイル名に対して正規表現を適用し、マッチする部分を取得する
+  const match = fileName.match(pattern);
+
+// マッチが見つかった場合の処理
+  if (match) {
+    //社員番号を取得する
+    let employeeId = match[1].trim();
+    // 名前を取得する 
+    let name = match[2].trim(); 
+　  //社員番号と名前を半角文字に変換し、余計な空白を削除する処理を行う
+    employeeId = processString(employeeId);
+    name = processString(name);
+     // 処理後の社員番号と名前をオブジェクトとして返す
+    return { employeeId, name };
+  } else {
+    
+    //マッチしない場合はnullまたはエラー処理を行う
+    console.error('ファイル名が無効です:' + fileName);
+    return null;
+  }
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//転記先ファイルから社員番号と名前を取得して、辞書型変数に格納する
+function extractData(sheet) {
+  // スプレッドシートから取得した行の総数を取得
+  const numRows = sheet.getLastRow();
+  // 社員情報を格納するための空のオブジェクトを作成
+  const employeeData = {};
+  // 8行目から最終行までの各行に対してループ処理を実行
+  for(let i = 8; i<= numRows; i++) {
+    // 3列目の値（社員番号）を取得し、文字列に変換した後、processString関数を通じて処理
+    const employeeID = processString(sheet.getRange(i,3).getValue().toString());
+     // 5列目の値（名前）を取得し、同様に文字列に変換してからprocessString関数で処理
+    const name = processString(sheet.getRange(i,5).getValue().toString());//名前を取得
+    // 処理した社員番号をキーとして、対応する名前をオブジェクトに格納
+    employeeData[employeeID] = name;
+
+  }
+  // 処理結果をコンソールに出力（デバッグ用）
+  // console.log(employeeData);
+  // 処理したデータを含むオブジェクトを返却
+  return employeeData;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//取得した社員番号や名前（アルファベットと英数字のみ）を半角にして、スペースをすべて削除する
+function processString(str) {
+  // まず文字列を半角に変換
+  const halfWidthString = toHalfWidth(str);
+  // 半角に変換した文字列から全てのスペースを削除
+  const noSpaceString = removeAllSpaces(halfWidthString);
+  // 最終的な処理済みの文字列を返す
+  return noSpaceString;
+}
+
+////取得した社員番号や名前（アルファベットと英数字のみ）を半角にする
+function toHalfWidth(str) {
+  return str.replace(/[Ａ-Ｚａ-ｚ０-９]/g, function(s){
+      // 各文字のUnicode値から0xFEE0を引くことで、対応する半角文字に変換
+    return String.fromCharCode(s.charCodeAt(0) - 0xFEE0);
+  });
+}
+
+// 文字列から全ての空白（スペース、全角スペースを含む）を削除する関数
+function removeAllSpaces(str){
+   // 正規表現[\s　]を使って半角スペース及び全角スペースをグローバルにマッチさせ、削除
+  return str.replace(/[\s　]/g, '');
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//課題名をもとに、「観点一覧」シートでの網羅率が格納されている列を抽出
+//発想：課題に紐づくセルを辞書型に格納する
+function getCellAddressForSheet1(targetFolderName) {
+  const cellMapping = {
+    '【QAスキルパート】第1回テスト設計課題_答え合わせについて': 'H18',
+    '【QAスキルパート】第2回テスト設計課題_答え合わせについて': 'H21',
+    '【QAスキルパート】第3回テスト設計課題_答え合わせについて': 'H19',
+    '【QAスキルパート】第4回テスト設計課題_答え合わせについて': 'H17',
+    '【総合課題】模範解答(チェックリスト)／答え合わせフォーム／解説動画について': 'K35'
+  };
+  return cellMapping[targetFolderName]; 
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//課題名をもとに、「質問表」シートでの網羅率が格納されている列を抽出
+//発想：課題に紐づくセルを辞書型に格納する
+function getCellAddressForSheet2(targetFolderName) {
+  const cellMapping = {
+    '【総合課題】模範解答(チェックリスト)／答え合わせフォーム／解説動画について': 'H24'
+  };
+  return cellMapping[targetFolderName] || 'H3'; //デフォルト値を設定
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//課題名をもとに、転記先列を抽出
+//発想：課題に紐づくセルを辞書型に格納する
+function getCellAddressForTargetSheet(targetFolderName){
+   const cellMapping = {
+    '【QAスキルパート】第1回テスト設計課題_答え合わせについて': ['G','H'],
+    '【QAスキルパート】第2回テスト設計課題_答え合わせについて': ['L','M'],
+    '【QAスキルパート】第3回テスト設計課題_答え合わせについて': ['Q','R'],
+    '【QAスキルパート】第4回テスト設計課題_答え合わせについて': ['V','W'],
+    '【総合課題】模範解答(チェックリスト)／答え合わせフォーム／解説動画について': ['AG','AH']
+  };
+  return cellMapping[targetFolderName];
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//転記先ファイルのC列をスキャンして社員番号の行インデクスを返す
+function findEmployeeIDInColumn(employeeID, sheet) {
+  // 指定されたシートのC列から8行目から最終行までの範囲を取得し、その値を配列として取得
+  const employeeIDs = sheet.getRange('C8:C' + sheet.getLastRow()).getValues();
+  // 取得した値の配列がネストされているため、flat()メソッドで1次元配列に変換し、
+  // 各要素を文字列に変換して、社員番号の比較に適した形に整える
+  const flatEmployeeIDs = employeeIDs.flat().map(id => id.toString());
+  //flatEmployeeIDs配列から、引数で指定されたemployeeIDを文字列に変換したものを検索し、その位置（インデックス）を取得
+  const index = flatEmployeeIDs.indexOf(employeeID.toString()); 
+
+  // 取得したインデックスが0以上（つまり、社員番号が見つかった場合）、
+  // 実際のスプレッドシート上の行番号に変換するために8を加える（C8から開始のため）。
+  // 見つからなかった場合は-1を返す。
+  return index >= 0 ? index + 8 : -1;
+}
+
+//以上と似たような処理
+//転記先ファイルのC列をスキャンして名前の行インデクスを返す
+function findEmployeeNameInColumn(employeeName, sheet) {
+  const employeeNames = sheet.getRange('E8:E' + sheet.getLastRow()).getValues();
+  // map関数内でundefinedチェックを追加
+  const flatEmployeeNames = employeeNames.flat().map(id => id ? id.toString() : ""); 
+  const index = flatEmployeeNames.indexOf(employeeName.toString());
+  return index >= 0 ? index + 8 : -1;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//転記先ファイルでの網羅率を更新する
+function updateCellValueConditional(sheet, rowIndex, column, newCoverage, employeeID, scoreUpdate) {
+  // 指定されたシートの指定された行と列からセルを取得
+  let cell = sheet.getRange(column + rowIndex);
+  // 取得したセルの数値形式をパーセンテージ形式に設定
+  cell.setNumberFormat('0%');
+
+  // セルが空の場合、新しい網羅率をセットし、何もしない
+  if (!cell.getValue()) {
+    cell.setValue(newCoverage); //セルが空の場合、通知用のリストに追加しない
+  } else if (cell.getValue() != newCoverage) {
+    cell.setValue(newCoverage);
+    //セルに値があり、その値が新しい網羅率と異なる場合
+    // セルの値を新しい網羅率で更新
+    if (!scoreUpdate.includes(employeeID)) {// 更新された社員番号がまだscoreUpdateリストに含まれていない場合、リストに追加
+      scoreUpdate.push(employeeID)
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
