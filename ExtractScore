@@ -1,0 +1,135 @@
+function 網羅率の転記() {
+  //事前設定シートから情報を取得し、転記作業を行って、slack通知する
+  //エラーが発生したら、エラー通知を行う
+  try {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet(); // 現在のスプレッドシートを取得
+    var spreadsheetId = spreadsheet.getId(); //ファイルidを取得
+    var ss = SpreadsheetApp.openById(spreadsheetId);//ファイルを開く
+    var sheet = ss.getSheetByName('事前設定');//Activeシートを取得
+    var period = sheet.getRange('A2').getValue();//実行用ファイルから研修期を取得
+    var month = sheet.getRange('B2').getValue();//実行用ファイルから月を取得
+    var targetSubject = sheet.getRange('C2').getValue();//実行用ファイルから対象課題を取得
+    var summaryFileUrl = sheet.getRange('E2').getValue();//転記先ファイルのurlを取得
+    var destinedFileID = sheet.getRange('F2').getValue();//転記先ファイルのidを取得
+    var slackWebhookURL = sheet.getRange('E6').getValue();//Slack Webhook URLを取得
+
+    //親フォルダ名
+    var parentFolderName = 'Classroom';
+    //【〇期〇月開始】テストエンジニア研修」ショートカットフォルダ名
+    var childFolderName = `【${period}期${month}月開始】テストエンジニア研修`;
+    //転記先ファイルの書き込みシート名:【〇期〇月開始】_評価
+    var targetSheetName = `${period}期${month}月開始_評価`;
+    //指定フォルダ名
+    var targetFolderName = targetSubject;
+    //フォルダid
+    var folderId = getFolderIdFromShortcut(parentFolderName, childFolderName, targetFolderName);
+    Logger.log(`${targetSubject}のID: ${folderId}`)//デバッグ用;
+    //転記作業を行う
+    const results = listFilesAndWriteValues(folderId, targetFolderName, targetSheetName, destinedFileID,period,month,targetSubject,summaryFileUrl);
+    //正常終了通知を行う
+    normalNotifySlack(period, month,targetSubject, summaryFileUrl, results.scoreUpdate, results.nonExistEmployeeId,results.errorFiles,slackWebhookURL);
+    } catch (e) {
+    // エラー内容と発生した箇所をメッセージとして組み立て
+    var errorMessage = `エラー詳細：${e.message}`
+    Logger.log(errorMessage);
+    //タイムアウトの際、エラーメッセージを送信
+    if (e.message.match(/(Exceeded maximum execution time|Timeout)/)) {
+    errorNotifySlack("1つの実行の最大実行時間を超えましたので、実行を停止しました。");
+  } // ---------------------------------1.0.3  ADD  START  ---------------------------------------------------------------------------------------------------
+  //指定フォルダに解答ファイルがない場合の通知
+    else if (e.message.match("ファイル0件")) { 
+    fileZeroNotifySlack(childFolderName, targetSubject, slackWebhookURL);
+    // ---------------------------------1.0.3  ADD  END  ---------------------------------------------------------------------------------------------------
+  } // Slackにエラーメッセージを通知
+    else {
+    errorNotifySlack(errorMessage, slackWebhookURL); 
+   }
+ }
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//正常終了通知
+
+function normalNotifySlack(period, month, targetSubject, summaryFileUrl, scoreUpdate, nonExistEmployeeId, errorFiles,slackWebhookURL) {
+
+  //タイトルを「正常終了」か「異常終了」か判別する
+  var title = errorFiles.length > 0 ? "*【一部エラーあり】*" : "*【正常終了】*";
+  //正常終了通知用のベースメッセージ
+  var baseMessage = `<!channel> 
+${title}
+
+【TE研修】提出課題データ抽出作業が完了し網羅率の転記が完了いたしました。
+
+研修期: ${period}
+研修月: ${month}
+対象課題: ${targetSubject}
+
+転記先ファイルのURL: 
+${summaryFileUrl}`;
+
+//網羅率の更新があった社員番号があれば、その内容をベースメッセージに追記
+  if (scoreUpdate.length > 0) {
+    var updateMessage = `\n\n下記社員の網羅率が更新されております。ご確認お願い致します。\n${scoreUpdate.join("\n")}`;
+    baseMessage += updateMessage;
+  }
+
+//存在しない社員番号があれば、その内容をベースメッセージに追記
+  if (nonExistEmployeeId.length > 0) {
+    var nonExistMessage = `\n\n下記社員はサマリファイルに存在しなかったため、サマリファイルには追加できておりません。ご確認お願い致します。\n\n${nonExistEmployeeId.join("\n")}`;
+    baseMessage += nonExistMessage;
+  }
+
+//ファイル名から社員番号や名前を取得する際、エラーが発生するファイルがあれば、その内容をベースメッセージに追記
+  if (errorFiles.length > 0) {
+    var errorFilesMessage = `\n\n下記のファイルからファイル名又はシート名等は指定のフォーマットと異なっているため、処理できませんでした。ご確認お願い致します。\n\n${errorFiles.join("\n\n")}`;
+    baseMessage += errorFilesMessage;
+  }
+
+
+  var webhookUrl = slackWebhookURL; // Slack Webhook URL
+  var payload = JSON.stringify({ "text": baseMessage });
+  var options = {
+    "method" : "post",
+    "contentType" : "application/json",
+    "payload": payload
+  };
+
+  UrlFetchApp.fetch(webhookUrl, options);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//エラーが発生したらユーザーにslack通知
+function errorNotifySlack(message,slackWebhookURL) {
+  var webhookUrl = slackWebhookURL; // Slack Webhook URL　
+  //メッセージの内容
+  var slackMessage = "<!channel>\n" + "*【エラー終了】*\n\n【TE研修】提出課題データ抽出作業が失敗し網羅率の転記ができませんでした。\nお手数ですが、再度実行しても完了しない場合は管理担当者にご連絡ください。\n\n" + message
+  var payload = JSON.stringify({ "text": slackMessage });
+  var options = {
+    "method" : "post",
+    "contentType" : "application/json",
+    "payload": payload
+  };
+
+  UrlFetchApp.fetch(webhookUrl, options);
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// ---------------------------------1.0.3  ADD  START  ---------------------------------------------------------------------------------------------------
+//解答ファイルがなかったら、slack通知する
+function fileZeroNotifySlack(childFolderName,targetSubject,slackWebhookURL) {
+  var webhookUrl = slackWebhookURL; // Slack Webhook URL　
+  //メッセージの内容
+  var slackMessage = "<!channel>\n" + "*【解答ファイルなし】*\n\n以下のフォルダに解答ファイルがなかったため、網羅率の転記が行われませんでした。\nご確認お願い致します。\n\n" + childFolderName + "＞" + targetSubject
+  var payload = JSON.stringify({ "text": slackMessage });
+  var options = {
+    "method" : "post",
+    "contentType" : "application/json",
+    "payload": payload
+  };
+
+  UrlFetchApp.fetch(webhookUrl, options);
+}
